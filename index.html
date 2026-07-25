@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minecraft TTK Heatmap Visualizer</title>
+    <style>
+        body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; margin: 20px; }
+        .controls { background: #181825; padding: 20px; border-radius: 8px; border: 1px solid #313244; max-width: 800px; }
+        .file-box { margin-bottom: 15px; }
+        textarea { width: 100%; height: 120px; background: #11111b; color: #a6adc8; border: 1px solid #45475a; padding: 10px; border-radius: 6px; box-sizing: border-box; }
+        button { background: #89b4fa; color: #11111b; border: none; padding: 10px 20px; font-weight: bold; border-radius: 6px; cursor: pointer; margin-top: 10px; }
+        button:hover { background: #b4befe; }
+        #error-msg { color: #f38ba8; font-weight: bold; margin-top: 10px; display: none; }
+        #grid-container { margin-top: 25px; overflow-x: auto; }
+        table { border-collapse: collapse; }
+        td { width: 35px; height: 35px; text-align: center; font-size: 10px; font-weight: bold; border: 1px solid #313244; position: relative; cursor: pointer; }
+        td:hover::after { content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #11111b; color: #cdd6f4; border: 1px solid #45475a; padding: 4px 8px; border-radius: 4px; white-space: nowrap; z-index: 10; font-size: 12px; }
+        .legend { display: flex; align-items: center; gap: 10px; margin-top: 15px; }
+        .bar { height: 15px; width: 200px; background: linear-gradient(to right, #00ff00, #ffff00, #ff0000); border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <h2>Minecraft TTK Data Visualizer</h2>
+    
+    <div class="controls">
+        <div class="file-box">
+            <label for="fileInput"><strong>Upload Result File (.json or .txt):</strong></label><br><br>
+            <input type="file" id="fileInput" accept=".json,.txt">
+        </div>
+        
+        <p><em>Or paste the raw text manually:</em></p>
+        <textarea id="inputData" placeholder="Paste JSON or Plain Text here..."></textarea><br>
+        <button onclick="processInput()">Generate Heatmap</button>
+        <div id="error-msg"></div>
+    </div>
+
+    <div class="legend">
+        <span>Fast (Low TTK)</span>
+        <div class="bar"></div>
+        <span>Slow (High TTK)</span>
+    </div>
+
+    <div id="grid-container"></div>
+
+    <script>
+        // File upload event listener
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            // Security Check 1: File size limit (max 5MB)
+            if (file.size > 5 * 1024 * 1024) {
+                showError("File is too large! Please upload a valid TTK result file under 5MB.");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                document.getElementById('inputData').value = evt.target.result;
+                processInput(); // Auto-generate on upload
+            };
+            reader.readAsText(file);
+        });
+
+        function parseAndValidate(text) {
+            let points = [];
+            text = text.trim();
+
+            if (!text) throw new Error("Input is empty!");
+
+            // Attempt JSON parsing first
+            if (text.startsWith('[')) {
+                try {
+                    let parsed = JSON.parse(text);
+                    if (!Array.isArray(parsed)) throw new Error();
+
+                    for (let item of parsed) {
+                        // Strict format validation for JSON objects
+                        if (
+                            typeof item === 'object' &&
+                            Array.isArray(item.pos) && item.pos.length === 3 &&
+                            item.pos.every(num => typeof num === 'number') &&
+                            typeof item.ttk === 'number'
+                        ) {
+                            points.push({ x: item.pos[0], z: item.pos[2], ttk: item.ttk });
+                        }
+                    }
+
+                    if (points.length > 0) return points;
+                } catch(e) {
+                    // Fall back to plain text regex if JSON parsing fails
+                }
+            }
+
+            // Attempt Regex parsing for plain text format: [-104, -58, 32]: 42
+            let lines = text.split('\n');
+            // Strict regex match ensuring numeric input only
+            let regex = /^\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\s*:\s*([\d\.]+)$/;
+
+            for (let line of lines) {
+                line = line.trim();
+                if (!line) continue;
+                
+                let match = line.match(regex);
+                if (match) {
+                    points.push({
+                        x: parseInt(match[1]),
+                        z: parseInt(match[3]),
+                        ttk: parseFloat(match[4])
+                    });
+                }
+            }
+
+            if (points.length === 0) {
+                throw new Error("Invalid file format! Make sure you upload a valid fixed_results.json or fixed_results_text.txt file.");
+            }
+
+            return points;
+        }
+
+        function getColor(value, min, max) {
+            let percent = (value - min) / (max - min || 1);
+            let r = Math.min(255, Math.floor(255 * (percent * 2)));
+            let g = Math.min(255, Math.floor(255 * (2 * (1 - percent))));
+            return `rgb(${r},${g},0)`;
+        }
+
+        function showError(msg) {
+            let err = document.getElementById('error-msg');
+            err.innerText = msg;
+            err.style.display = 'block';
+            document.getElementById('grid-container').innerHTML = '';
+        }
+
+        function clearError() {
+            let err = document.getElementById('error-msg');
+            err.style.display = 'none';
+        }
+
+        function processInput() {
+            clearError();
+            let text = document.getElementById('inputData').value;
+
+            try {
+                let data = parseAndValidate(text);
+
+                let xs = data.map(d => d.x);
+                let zs = data.map(d => d.z);
+                let ttks = data.map(d => d.ttk);
+
+                let minX = Math.min(...xs), maxX = Math.max(...xs);
+                let minZ = Math.min(...zs), maxZ = Math.max(...zs);
+                let minTTK = Math.min(...ttks), maxTTK = Math.max(...ttks);
+
+                let map = {};
+                data.forEach(d => map[`${d.x},${d.z}`] = d.ttk);
+
+                let html = '<table>';
+                for (let z = minZ; z <= maxZ; z++) {
+                    html += '<tr>';
+                    for (let x = minX; x <= maxX; x++) {
+                        let key = `${x},${z}`;
+                        if (key in map) {
+                            let ttk = map[key];
+                            let bg = getColor(ttk, minTTK, maxTTK);
+                            let tooltip = `Pos: [${x}, -58, ${z}] | TTK: ${ttk}`;
+                            html += `<td style="background:${bg}; color:#000;" data-tooltip="${tooltip}">${ttk}</td>`;
+                        } else {
+                            html += `<td style="background:#181825;"></td>`;
+                        }
+                    }
+                    html += '</tr>';
+                }
+                html += '</table>';
+                document.getElementById('grid-container').innerHTML = html;
+
+            } catch (err) {
+                showError(err.message);
+            }
+        }
+    </script>
+</body>
+</html>
